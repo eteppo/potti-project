@@ -1,0 +1,2105 @@
+---
+title: Analysis protocol of the "Single-centre study reports 84% five-year overall
+  survival rate for all solid paediatric tumours" -study
+author: "Eero Teppo"
+date: "Last update `r Sys.Date()`"
+output: word_document
+---
+
+```{r global_options, include=FALSE}
+library(knitr)
+opts_chunk$set(eval=TRUE,
+               warning=FALSE, 
+               message=FALSE, 
+               fig.width=12, 
+               fig.height=12)
+```
+
+# 1. Software
+
+This document and analyses were done using R version 3.2.2 with "x86_64-w64-mingw32" platform, with RStudio, RMarkdown, and several external packages.
+
+R Core Team (2015). R: A language and environment for statistical computing. R Foundation for
+Statistical Computing, Vienna, Austria. URL https://www.R-project.org/.
+
+# 2. Research questions guiding analyses
+
+Batch 1. Survival experience inference:
+
+- What was the 1-year and 5-year overall survival probability of...
+    + a. ICCC3 group III (CNS) patients?
+    + b. non-III patients
+    + c. all solid tumor patients?
+- What was the survival function of...
+    + a. all patients by ICCC3 main tumor classes?
+    + b. the ICCC3 group II patients (lymphomas) by II-subclasses?
+    + c. non-III patients by transplantation?
+    + d. III patients by transplantation?
+- How this data compares to European and Finnish estimates? (Gatta et al. and Madanat-Harjuoja et al.)
+- How different was survival in patients diagnosed in 1990-1999 and 2000-2014?
+
+Survival experience comparison inference:
+
+- Was there a difference between survival functions of...
+    + a. patient populations with different stage at diagnosis?
+    + b. neuroblastoma patient populations with different stage at diagnosis?
+
+Batch 2. Stage distribution inference:
+
+- What was the stage distribution of...
+    + a. all patients by ICCC3 main tumor classes?
+
+Batch 3. Tumor size distribution comparison inference:
+
+- Was there a difference between tumor size distributions of
+    + a. patient populations with different stage at diagnosis?
+    + b. III and non-III groups of patients?
+- What was the difference between tumor size distributions of males and females in III and non-III patient populations?
+- What was the correlation of tumor size and age at diagnosis in III and non-III patient populations?
+
+Batch 4. Transplantation proportion inference:
+
+- What proportion of patients by ICCC3 -main groups was treated with autologous stem cell transplantation?
+
+Batch 5. Diagnostic imaging trend inference:
+
+- What were the trends of diagnostic imaging modalities like?
+- How likely was there a change in the populations of trends of diagnostic imaging modalities?
+
+Batch 6. Metastasis proportion inference:
+
+- What was the proportion of metastasised cancers in...
+    + a. III group?
+    + b. non-III group?
+    
+Batch 7. Exploratory Cox regression modeling of survival time and predictors
+
+Batch 8. The correlation of body area and tumor size:
+
+- What was the correlation of tumor size and body area in non-CNS patients?
+
+# 3. Raw data cleaning
+## 3.1. Reading
+```{r read-data, eval = TRUE}
+path_raw <- "G:/Projects/potti/data/raw/potti-kk-20150529.xlsx"
+library(readxl)
+pottikk_raw <- read_excel(path = path_raw)
+```
+
+## 3.2. Coercing to tdb_df-class
+```{r to-tbl-df, eval = TRUE}
+library(dplyr)
+pottikk_raw <- tbl_df(pottikk_raw)
+```
+
+## 3.3. Combining, selecting, filtering, and renaming
+
+- Only relevant variables (columns) and observations (rows) are selected from the raw data.
+
+```{r rename-relevant-subset, eval = TRUE}
+# necessary class and name changes
+library(lubridate)
+pottikk_raw$Syntymäaika <- dmy(pottikk_raw$Syntymäaika)
+names(pottikk_raw) <- gsub(" ", "_", names(pottikk_raw))
+names(pottikk_raw) <- gsub("-", "_", names(pottikk_raw))
+pottikk <- pottikk_raw %>%
+  # selecting variables concerning research questions
+  select(id = Id, 
+         birth_date = Syntymäaika, 
+         death_date = Kuolinpvm, 
+         sex1 = Sukupuoli,
+         ds = Ds, 
+         iccc_main = ICCC3_paaluokka_ICCC3_luokitus,
+         iccc_sub = ICCC3_alaluokka_ICCC3_luokitus,
+         dx_date = DiagnoosiPvm_KKdiagnoosivaihe,
+         tumorsize = Primaarikasvaimenkok_KKdiagnoosivaihe,
+         stage = Stage_KKdiagnoosivaihe, 
+         sex2 = Sukupuoli_KKdiagnoosivaihe,
+         hsct_date = Kantasolusiirtopvm_KKkantasolusiirto,
+         hsct_type = Siirretyyppi_KKkantasolusiirto, 
+         hsct_place = Siirtopaikka_KKkantasolusiirto,
+         bonemap = Luustokartta_KKkuvantaminenDiag,
+         mri_local = MagneettiPaikallinen_KKkuvantaminenDiag,
+         mibg = MIBG_KKkuvantaminenDiag,
+         mri = MRI_KKkuvantaminenDiag,
+         pet = PET_CT_TT_KKkuvantaminenDiag,
+         ct_lung = TTkeuhkot_KKkuvantaminenDiag,
+         ct_local = TTpaikallinen_KKkuvantaminenDiag,
+         primary = Syopatauti_Syopatauti,
+         first_relapse_date = Relapsipvm_KKrelapsi) %>%
+  # filtering a) primary cases (not relapse),
+  filter(ds == 1) %>%
+  # b) aged [0, 16) years at diagnosis AND 
+  mutate(age_dx = as.period(dx_date - birth_date) / years(1)) %>%
+  filter(age_dx < 16 & age_dx >= 0) %>%
+  # c) only 1st primary case per patient
+  filter(primary == 1 | is.na(primary)) %>%
+  # remove variables used for filtering
+  select(-ds, -primary)
+
+```
+
+## 3.4. Fixing existing, making new and dropping old variables
+
+a) Making new variables
+
+```{r mutate-new-vars, eval = TRUE}
+# censoring date at the last database update
+pottikk <- pottikk %>%
+  mutate(censor_date = ymd("2015-05-29"))
+```
+
+b) Infering new variables
+
+```{r infer-new-vars, eval = TRUE}
+pottikk <- pottikk %>%
+  # death indicator from date data
+  mutate(death = ifelse(is.na(death_date), 0, 1)) %>%
+  # hsct indicator from date or type or place data (note!)
+  mutate(hsct = ifelse(!is.na(hsct_date) | 
+                         !is.na(hsct_type) |
+                         !is.na(hsct_place),
+                yes = 1,
+                no = 0)) %>%
+  # follow-up time from diagnosis date
+  mutate(followup = 
+           ifelse(death == 1,
+                  as.period(death_date - dx_date) / years(1),
+                  as.period(censor_date - dx_date) / years(1))) %>%
+  # year of birth, diagnosis and death variables
+  mutate(birth_year = year(birth_date),
+         death_year = year(death_date),
+         dx_year = year(dx_date)) %>%
+  # iccc groups
+  mutate(iccc = paste(iccc_main, iccc_sub, sep="")) %>%
+  mutate(iccc = ifelse(iccc == "NANA", NA, iccc)) %>%
+  # new imaging modality variables
+  mutate(bonemap = ifelse(bonemap == "Ei tehty", 0, 1),
+         mri = ifelse(mri_local == "Ei" & mri == "Ei", 0, 1),
+         mibg = ifelse(mibg == "Ei tehty", 0, 1),
+         pet = ifelse(pet == "Ei", 0, 1),
+         ct = ifelse(ct_lung == "Ei" & ct_local == "Ei", 0, 1)) %>%
+  # relapse status (one or more) variable
+  mutate(relapse_status = ifelse(is.na(first_relapse_date), 0, 1)) %>%
+  # drop variables used only for infering wanted variables
+  select(-censor_date, -hsct_type, -hsct_date,
+         -dx_date, -birth_date, -death_date,
+         -iccc_sub, -ct_lung, -ct_local, -mri_local,
+         -first_relapse_date)
+```
+
+c) Categorizing
+```{r categorizations, eval = TRUE}
+require(stringr)
+
+pottikk <- pottikk %>%
+  # stage to 1, 2, 3, 4, 4S, 5 and M
+  mutate(stage = ifelse(stage == "4s" |
+                          stage == "5" |
+                          stage == "M",
+                        stage,
+                        str_extract(stage, "\\d"))) %>%
+  # stage 5 and M to stage 4
+  mutate(stage = ifelse(stage == "5" | stage == "M",
+                        yes = "4",
+                        no = stage)) %>%
+  # iccc III vs. others -variable
+  mutate(iccc_cns = ifelse(iccc_main == "III",
+                           yes = 1, 
+                           no = ifelse(is.na(iccc_main), NA, 0))) %>%
+  # categorising too continuous variables for frequency tabulation
+  mutate(death_year_cat = cut(death_year,
+                              breaks=c(1994, 1999, 2004, 2009, 2015),
+                              labels=c("1995-1999", "2000-2004", 
+                                       "2005-2009", "2010-2015*")),
+         dx_year_cat = cut(dx_year,
+                           breaks=c(1986, 1993, 2000, 2006, 2015),
+                           labels=c("1987-1993", "1994-2000",
+                                    "2001-2007", "2008-2015")),
+         age_dx_cat = cut(age_dx,
+                          breaks=c(-1, 3.9999, 7.9999, 11.9999, 16),
+                          labels=c("0-3","4-7", "8-11", "12-16")),
+         tumorsize_cat = cut(tumorsize,
+                             breaks=c(0, 4.9999, 9.9999, 14.9999, 20),
+                             labels=c("0-4", "5-9", "10-14", "15-20")))
+
+# checking reveals NA's introduced in categorization; fixed
+# apply(pottikk, 2, function(x) {sum(is.na(x))})
+```
+
+d) Fixing
+```{r fix-vars, eval = TRUE}
+pottikk <- pottikk %>%
+  # sex variable integration
+  mutate(sex = ifelse(is.na(sex1),
+                      sex2,
+                      sex1)) %>%
+  # drop sex1 and sex2
+  select(-sex1, -sex2) %>%
+  # English
+  mutate(sex = ifelse(sex == "Mies", "Boy", "Girl"))
+  
+# iccc-information missing -> "missing" (for tabulation)
+pottikk$iccc_main[is.na(pottikk$iccc_main)] <- "Missing"
+```
+
+## 3.5. Summarizing the dataset
+
+```{r summary, eval = TRUE}
+# characters to factors
+characters <- sapply(pottikk, is.character)
+pottikk[characters] <- lapply(pottikk[characters], factor)
+rm(characters)
+
+library(Hmisc)
+describe(pottikk)
+summary(pottikk)
+```
+
+## 3.6. Checking classes
+
+Characters, numerics, and dates
+
+```{r clean-classes, eval = TRUE}
+# factors to characters
+factors <- sapply(pottikk, is.factor)
+pottikk[factors] <- lapply(pottikk[factors], as.character)
+rm(factors)
+
+# id to character
+pottikk$id <- as.character(pottikk$id)
+```
+
+## 3.7. Arranging observations
+```{r arrange-dataset, eval = TRUE}
+pottikk <- pottikk %>%
+  select(id, iccc_cns, iccc_main, iccc,
+         death, death_year, relapse_status, death_year_cat, followup, 
+         birth_year, dx_year, 
+         dx_year_cat, sex, age_dx, age_dx_cat, stage, tumorsize, 
+         tumorsize_cat, hsct, hsct_place, bonemap, 
+         mibg, pet, ct, mri) %>%
+  arrange(id)
+```
+
+## 3.8. Frequency tabulation (Table 1)
+
+```{r tabulate-dataset, eval = TRUE}
+## Frequency tabulation of categorized variables
+library(tidyr)
+table1 <- pottikk %>%
+  # Select categorical variables in the order of tabulation
+  select(id, iccc_main, sex, dx_year_cat, age_dx_cat, stage, tumorsize_cat,
+         hsct, death, death_year_cat) %>%
+  # To longest format
+  gather("variable", "value", -id, -iccc_main) %>%
+  # Summarise values to category frequencies
+  group_by(iccc_main, variable, value) %>%
+  summarise(n = n()) %>%
+  # Setup for iccc3 column spread
+  ungroup() %>%
+  mutate(row = 1:nrow(.)) %>%
+  # ICCC3 to columns
+  spread(iccc_main, n) %>%
+  # Summarise again to frequencies
+  group_by(variable, value) %>%
+  summarise_each(funs(sum(., na.rm=TRUE))) %>%
+  # Clean up
+  ungroup() %>%
+  select(-row) %>%
+  # Row total -column
+  mutate(all = Missing + II + III + IV + V + 
+           VI + VII + VIII + IX + X + XI + XII) %>%
+  # Order columns
+  select(variable, value, all, II, III, IV, 
+         V, VI, VII, VIII, IX, X, XI, XII, Missing)
+
+# Make "all"-row and bind to table1
+table1 <- table1 %>%
+  filter(variable == "death") %>%
+  select(all:Missing) %>%
+  summarise_each(funs(sum)) %>%
+  bind_rows(table1, .)
+
+# To table with printr -package
+library(printr)
+table1
+
+# Delete and fix tabulation-only variables and changes
+pottikk <- pottikk %>%
+  select(-death_year_cat, -dx_year_cat, -age_dx_cat, -tumorsize_cat)
+pottikk$iccc_main <- gsub("Missing", NA, pottikk$iccc_main)
+```
+
+## 3.8. Saving clean study dataset
+
+```{r save-clean-dataset, eval=FALSE}
+path_clean <- "G:/Projects/potti/data/final-tidy"
+setwd(path_clean)
+save(pottikk, file="potti-kk-20150529-clean.RData")
+write.csv(pottikk, file = "potti-kk-20150529-clean.csv")
+for (i in 1:2) setwd("../")
+```
+
+# 4. Batch 1: Patient populations' survival experience analyses
+
+Nine questions regarding survival experience and their comparisons will be analysed in this first batch.
+
+## 4.1. Selecting and filtering from clean data
+
+```{r select-filter-survival, eval = TRUE}
+library(dplyr)
+## Variables needed:
+## iccc variables, death indicator, follow-up, stage, hsct, hsct place, diagnosis year
+surv_exp <- pottikk %>%
+  select(death, followup, iccc_cns, iccc_main, 
+         iccc, hsct, hsct_place, stage, dx_year)
+```
+
+## 4.2. Describing and Handling missing values
+Missingness structure
+```{r missingess-survival, eval = TRUE}
+library(VIM)
+library(dplyr)
+matrixplot(arrange(surv_exp[ , c(1, 2, 3, 6, 8)], death, followup))
+```
+
+Handling: Complete case analyses
+
+## 4.3. Main analysis
+Primary analytics methods: Kaplan-Meier (95% CI, log), log-rank test (no weight)
+
+```{r model-fits-survival}
+# Fit kaplan-meier curves as in questions; 9 fits in total
+library(survival)
+library(dplyr)
+# Empty list for fit results
+surv_exp_fits <- list()
+## 1. All
+surv_exp_fits[[1]] <- with(surv_exp, 
+                     survfit(formula = Surv(time=followup, event=death) ~ 1))
+## 2. III
+surv_exp_fits[[2]] <- with(filter(surv_exp, iccc_main=="III"), 
+                     survfit(formula = Surv(time=followup, event=death) ~ 1))
+## 3. non-III
+surv_exp_fits[[3]] <- with(filter(surv_exp, iccc_main != "III" & !is.na(iccc_main)), 
+                     survfit(formula = Surv(time=followup, event=death) ~ 1))
+#################
+# 4. ICCC3 main classes
+################
+surv_exp_fits[[4]] <- with(filter(surv_exp, !is.na(iccc_main)), 
+                     survfit(formula = Surv(time=followup, event=death) ~ iccc_main))
+
+## 5. III by transplantation
+surv_exp_fits[[5]] <- with(filter(surv_exp, iccc_main == "III" & 
+                                  (hsct_place == "TAYS" | 
+                                  is.na(hsct_place))), 
+                     survfit(formula = Surv(time=followup, event=death) ~ hsct))
+## 6. non-III by transplantation
+surv_exp_fits[[6]] <- with(filter(surv_exp, iccc_main != "III" &
+                                  !is.na(iccc_main) &
+                                  (hsct_place == "TAYS" | 
+                                  is.na(hsct_place))), 
+                     survfit(formula = Surv(time=followup, event=death) ~ hsct))
+########## 
+# 7. II by sub-classes
+############
+surv_exp_fits[[7]] <- with(filter(surv_exp, iccc_main == "II"), 
+                     survfit(formula = Surv(time=followup, event=death) ~ iccc))
+# 8. IV by stage
+## a. fit for visualization
+surv_exp_fits[[8]] <- with(filter(surv_exp, iccc_main == "IV" & !is.na(stage)), 
+                     survfit(formula = Surv(time=followup, event=death) ~ stage))
+# 9. Non-III by stage
+## a. fit for visualization
+surv_exp_fits[[9]] <- with(filter(surv_exp, !is.na(stage) & iccc_cns == 0), 
+                     survfit(formula = Surv(time=followup, event=death) ~ stage))
+```
+
+
+```{r model-fit-comparison-survival}
+library(survival)
+library(dplyr)
+# Empty list for comparison results
+surv_exp_comp <- list()
+# 8. IV by stage
+surv_exp_comp[[1]] <- with(filter(surv_exp, iccc_main == "IV" & !is.na(stage)),
+                           survdiff(formula = Surv(time=followup, event=death) ~ stage))
+# 9. Non-III by stage
+surv_exp_comp[[2]] <- with(filter(surv_exp, !is.na(stage) & iccc_cns == 0),
+                           survdiff(formula = Surv(time=followup, event=death) ~ stage))
+# 5. Non-CNS by transplantation
+surv_exp_comp[[3]] <- with(filter(surv_exp, iccc_main != "III" &
+                                  !is.na(iccc_main) &
+                                  (hsct_place == "TAYS" | 
+                                  is.na(hsct_place))), 
+                           survdiff(formula = Surv(time=followup, event=death) ~ hsct))
+
+# 6. CNS (III) by transplantation
+surv_exp_comp[[4]] <- with(filter(surv_exp, iccc_main == "III" & 
+                                  (hsct_place == "TAYS" | 
+                                  is.na(hsct_place))), 
+                           survdiff(formula = Surv(time=followup, event=death) ~ hsct))
+
+```
+
+### 4.3.1. Investigating the assumption of similar prospects: How different was survival in patients diagnosed in 1990-1999 and 2000-2015?
+
+No adjustments.
+
+```{r survival-dx-year-comparison}
+library(dplyr)
+## Select, filter, and mutate necessary variables
+surv_earlylate <- surv_exp %>%
+  select(death, followup, dx_year) %>%
+  filter(dx_year >= 1990) %>%
+  mutate(dx_year = ifelse(dx_year >= 2000, yes = "late", no = "early"))
+## Kaplan-Meier fit
+library(survival)
+surv_earlylate_fit <- with(surv_earlylate, 
+                           survfit(formula = Surv(time=followup, event=death) ~ dx_year))
+## Comparison
+surv_earlylate_comp <- with(surv_earlylate, 
+                           survdiff(formula = Surv(time=followup, event=death) ~ dx_year))
+```
+
+### 4.3.2. Cleaning fit outputs
+
+```{r survival-clean-analysis-output}
+library(broom)
+library(dplyr)
+
+## Main analyses
+surv_exp_tidy <- data.frame()
+surv_fit_type <- c("All", "III", "Non-III", "ICCC3 main", 
+                 "III by transplantation", "Non-III by transplantation", 
+                 "II by sub-classes", "IV by stage", "Non-III by stage")
+for (i in 1:length(surv_fit_type)) {
+  tidy_fit <- tidy(surv_exp_fits[[i]])
+  which_analysis <- data.frame(fit = rep(surv_fit_type[i], nrow(tidy_fit)))
+  surv_exp_tidy <- bind_rows(surv_exp_tidy, cbind(which_analysis, tidy_fit))
+}
+surv_exp_tidy$strata[is.na(surv_exp_tidy$strata)] <- "strata=none"
+rm(tidy_fit, which_analysis)
+
+## Early (1990-99) vs.late (2000-15) diagnosed comparison
+surv_earlylate_fit  <- tidy(surv_earlylate_fit)
+```
+
+### 4.3.3. Tabulation
+
+```{r survival-tabulation}
+library(gridExtra)
+library(dplyr)
+
+## Fit summary columns:
+# fit, strata, min, median and max of follow-up
+table_surv1 <- surv_exp_tidy %>%
+  group_by(fit, strata) %>%
+  summarise(n = n(),
+            min_time = round(min(time), 1),
+            median_time = round(median(time), 1),
+            max_time = round(max(time), 1))
+
+# Year-estimates and their CIs need to be collected
+# from raw fit outputs
+## 1. Empty matrix for collection
+table_surv2 <- matrix(nrow = 30, ncol = 4)
+
+### Columns: 1-year (CI), 5-year (CI), 10-year (CI), 20-year (CI)
+## 2. For each fit and strata, 
+## 3. For each year-cutoff, grab the three needed values with stepfun, and
+## paste them together in format "survival (lowerCI - upperCI)", and fill in
+
+for (i in 1:nrow(table_surv1)) {
+  df <- filter(surv_exp_tidy, fit == table_surv1$fit[i] & strata == table_surv1$strata[i])
+  surv_est <- stepfun(df$time, c(1, df$estimate))
+  surv_low <- stepfun(df$time, c(1, df$conf.low))
+  surv_high <- stepfun(df$time, c(1, df$conf.high))
+  year_est <- c(1, 5, 10, 20)
+  for (j in 1:length(year_est)) {
+    if (year_est[j] <= max(df$time)) {
+      table_surv2[i, j] <- 
+        paste(round(surv_est(year_est[j]), 2), 
+            " (", 
+            round(surv_low(year_est[j]), 2), 
+            " - ", 
+            round(surv_high(year_est[j]), 2), 
+            ")",
+            sep = "")
+      } else {
+        table_surv2[i, j] <- ""
+      }
+  } 
+}
+table_surv2 <- as.data.frame(table_surv2)
+
+### Fix names and values
+names(table_surv2) <- c("one_year_95CI", 
+                        "five_year_95CI", 
+                        "ten_year_95CI",
+                        "twenty_year_95CI")
+
+table_surv1$strata <- table_surv1$strata %>%
+  gsub("=", " ", .) %>%
+  gsub("_", " ", .) %>%
+  gsub("iccc", "ICCC3", .) %>%
+  gsub("hsct 1", "auto-HSCT", .) %>%
+  gsub("hsct 0", "No auto-HSCT", .) %>%
+  gsub("strata none", "", .) %>%
+  gsub("stage", "Stage", .) %>%
+  gsub("main", "", .)
+
+table_surv1$fit <- table_surv1$fit %>%
+  gsub(" by transplantation", "", .) %>%
+  gsub(" by sub-classes", "", .) %>%
+  gsub(" by stage", "", .) %>%
+  gsub("ICCC3 main", "All", .)
+
+table_surv1$fit[13:23] <- paste("ICCC3", table_surv1$fit[13:23], sep = " ")
+
+table_surv <- bind_cols(table_surv1, table_surv2)
+names(table_surv) <- c("Subset", "Stratum", "N", "Min", "Median",
+                       "Max", "One year", "Five years", 
+                       "Ten years", "Twenty years")
+table_surv <- table_surv[c(1:4, 6:9, 5, 10:30), ]
+
+### Remove intermediate objects
+rm(table_surv1, table_surv2, i, j, surv_est, surv_high, surv_low, year_est, df)
+
+
+## Comparison summary columns:
+# Columns: group, compare, chisq, p_value
+table_surv_comp <- data.frame(group = c("IV", "Non-III", "Non-III", "III", "All"), 
+                              compare = c("stage", "stage", "auto-HSCT", 
+                                          "auto-HSCT", "90's vs. 00's diagnosed"),
+                              chisq = c(surv_exp_comp[[1]]$chisq, 
+                                        surv_exp_comp[[2]]$chisq,
+                                        surv_exp_comp[[3]]$chisq,
+                                        surv_exp_comp[[4]]$chisq,
+                                        surv_earlylate_comp$chisq),
+                              p_value = c(0.0366, 3.45e-11, 5.96e-10, 
+                                          0.0131, 0.875)) 
+# Plot tables
+library(gridExtra)
+grid.arrange(tableGrob(table_surv))
+grid.arrange(tableGrob(table_surv_comp))
+
+# setwd("figures&tables/protocol-output")
+# pdf("survival-tables.pdf", width=14, height=12)
+# grid.arrange(tableGrob(table_surv))
+# grid.arrange(tableGrob(table_surv_comp))
+# dev.off()
+# for (i in 1:2) setwd("../")
+```
+
+Final touch is done in InkScape.
+
+### 4.3.4. Visualization
+
+Exploratory/raw plots of all Kaplan-Meier curves:
+
+```{r survival-visualization}
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+# Plot, print and save all fits
+
+## (x=0, y=1) points needs to be added for all fit-strata -pairs
+zeros <- surv_exp_tidy %>%
+  group_by(fit, strata) %>%
+  summarise(time=0, estimate=1, conf.high=1, conf.low=1)
+## Bind fits and (0, 1) points
+surv_exp_tidy_plot <- bind_rows(surv_exp_tidy, zeros)
+## Clean strata-variable
+library(tidyr)
+surv_exp_tidy_plot <- surv_exp_tidy_plot %>% 
+  separate(strata, c("delete", "strata"), sep="=") %>%
+  select(-delete)
+
+
+
+# EXPLORATORY plots
+# setwd("figures&tables/protocol-output")
+for (i in unique(surv_exp_tidy$fit)) {
+  ## All, III, Non-III, ICCC3 main, and II are faceted
+  if (i %in% c("All", "III", "Non-III", "ICCC3 main", "II by sub-classes")) {
+  surv_plot <- ggplot(filter(surv_exp_tidy_plot, fit == i)) +
+    geom_step(aes(x=time, y=estimate)) +
+    geom_step(aes(x=time, y=conf.high), linetype="dashed") +
+    geom_step(aes(x=time, y=conf.low), linetype="dashed") +
+    facet_wrap(~ strata) +
+    theme_bw() +
+    scale_y_continuous(limits=c(0, 1)) +
+    scale_x_continuous(limits=c(0, 30)) +
+    ggtitle(i) +
+    xlab("Follow-up (years)") +
+    ylab("Survival probability estimate")
+  } else {
+    ## Other fits to the same facet
+      surv_plot <- ggplot(filter(surv_exp_tidy_plot, fit == i)) +
+    geom_step(aes(x=time, y=estimate, colour=strata)) +
+    theme_bw() +
+    geom_step(aes(x=time, y=conf.high, colour=strata), linetype="dashed") +
+    geom_step(aes(x=time, y=conf.low, colour=strata), linetype="dashed") +
+    scale_color_brewer(palette="Greys") +
+    scale_y_continuous(limits=c(0, 1)) +
+    scale_x_continuous(limits=c(0, 30)) +
+    ggtitle(i) +
+    xlab("Follow-up (years)") +
+    ylab("Survival probability")
+  }
+  ggsave(filename = paste("surv-plot-", 
+                          tolower(gsub(" ", "-", i)), 
+                          ".pdf", 
+                          sep=""),
+         plot = surv_plot,
+         width=8,
+         height=10)
+  print(surv_plot)
+}
+# for (i in 1:2) setwd("../")
+rm(zeros)
+```
+
+**Figure 1 is created below:**
+
+- Only classes **that have over 10 observations are included**, including sub-classes of main class II
+    - IId, VII, and XII will be removed
+- 'Effective' *n* is labeled into the main window (i.e. n that Kaplan-Meier uses because of events at the same time)
+- Better facet labels
+- Classes ordered (factorize, order levels)
+
+```{r figure1, eval = TRUE}
+ns <- data.frame(strata = levels(factor(surv_exp_tidy_plot$strata))
+                                  [c(6:13, 15:21)][c(1, 6:15, 2:5)],
+                 n = table_surv$n[6:20])[-c(7, 11, 15), ]
+
+surv_exp_tidy_plot %>%
+  mutate(strata = factor(strata, levels = levels(factor(strata))
+                                 [c(1:5, 6:12, 15:18, 13, 19:21, 14)]),
+         estimate = estimate * 100,
+         conf.low = conf.low * 100,
+         conf.high = conf.high * 100) %>%
+  filter((fit == "ICCC3 main" | 
+          fit == "II by sub-classes") &
+          (!strata %in% c("IId", "VII", "XII"))) %>%
+  ggplot() +
+    geom_step(aes(x=time, y=estimate)) +
+    geom_step(aes(x=time, y=conf.high), linetype="dashed") +
+    geom_step(aes(x=time, y=conf.low), linetype="dashed") +
+    facet_wrap(~ strata) +
+    theme_bw() +
+    scale_y_continuous(limits=c(0, 100), breaks = seq(0, 100, by = 20)) +
+    scale_x_continuous(limits=c(0, 30), breaks = seq(0, 30, by = 5)) +
+    xlab("Follow up (years)") +
+    ylab("Overall survival rate (%)") +
+    ggtitle("Figure 1: Overall survival rate by ICCC-3 classes") +
+    geom_text(data = ns, aes(x = 15, y = 10, label = paste("n =", n)), size = 4.5)
+```
+
+Final touch to Figure 1 is done with InkScape.
+
+**Parts of figure 2 are created here**
+
+```{r fig2-survival}
+library(ggplot2)
+library(gridExtra)
+
+# Non-III by stage (a)
+surv_allbystage_plot <- surv_exp_tidy_plot %>%
+filter(fit == "Non-III by stage") %>%
+ggplot() +
+    geom_step(aes(x=time, y=estimate*100, colour=strata), size = 1) +
+    theme_bw() +
+    geom_step(aes(x=time, y=conf.high*100, colour=strata), linetype="dashed") +
+    geom_step(aes(x=time, y=conf.low*100, colour=strata), linetype="dashed") +
+    scale_color_grey(start = 0, end = 0.6,
+                     labels = c("Stage 1", "Stage 2", "Stage 3", "Stage 4")) +
+    scale_y_continuous(limits=c(0, 100)) +
+    scale_x_continuous(limits=c(0, 30), breaks = seq(0, 30, by = 5)) +
+    ggtitle("a)") +
+    xlab("Follow up (years)") +
+    ylab("Survival rate (%)") +
+    theme(legend.position = c(0.95, 0.75),
+          legend.title = element_blank())
+
+
+# IV by stage (b)
+surv_ivbystage_plot <- surv_exp_tidy_plot %>%
+filter(fit == "IV by stage") %>%
+ggplot() +
+    geom_step(aes(x=time, y=estimate*100, colour=strata), size = 1) +
+    theme_bw() +
+    geom_step(aes(x=time, y=conf.high*100, colour=strata), linetype="dashed") +
+    geom_step(aes(x=time, y=conf.low*100, colour=strata), linetype="dashed") +
+    scale_color_grey(start = 0, end = 0.6,
+                     labels = c("Stage 1", "Stage 2", "Stage 3", "Stage 4")) +
+    scale_y_continuous(limits=c(0, 100)) +
+    scale_x_continuous(limits=c(0, 30), breaks = seq(0, 30, by = 5)) +
+    ggtitle("b)") +
+    xlab("Follow up (years)") +
+    ylab("Survival rate (%)") +
+    theme(legend.position = c(0.95, 0.75),
+          legend.title = element_blank())
+
+stagefig_surv <- arrangeGrob(surv_allbystage_plot, surv_ivbystage_plot, nrow = 2)
+
+```
+
+## 4.4. How different was survival in patients diagnosed in 1990-1999 and 2000-2015?
+
+```{r survival-dx-year-visualization}
+library(ggplot2)
+surv_earlylate_plot <- ggplot(surv_earlylate_fit) +
+  geom_step(aes(x = time, y = estimate*100, color = strata), size = 1.3) +
+  geom_step(aes(x = time, y = conf.high*100, color = strata), 
+            linetype = "dashed") +
+  geom_step(aes(x = time, y = conf.low*100, color = strata), 
+            linetype = "dashed") +
+  theme_bw() +
+  xlab("Follow up (years)") +
+  ylab("Survival rate (%)") +
+  scale_color_manual(labels = c("1990-1999", "2000-2015"),
+                       values = c("black", "grey")) +
+  labs(color = "Year of diagnosis") +
+  annotate("text", 
+           y=95, 
+           x=15, 
+           label=paste("p =", table_surv_comp$p_value[5]),
+           size = 5) +
+  theme(legend.position = c(0.9, 0.5)) +
+  ggtitle("Supplement figure 1: Survival rate by year of diagnosis")
+
+surv_earlylate_plot
+# setwd("figures&tables/protocol-output")
+# ggsave("surv-early-vs-late-diagnosed.pdf")
+# for (i in 1:2) setwd("../")
+```
+
+## 4.5. How these results compare to European numbers and Finnish numbers?
+
+- Europe 2000-2007: Gatta et al. PMID: 24314616
+- Finland 2001-2010: Madanat-Harjuoja et al. PMID: 24623568
+
+```{r survival-gatta-madanat-visualization}
+library(ggplot2)
+library(gridExtra)
+
+# Collecting 5 year overall survival from the articles
+# Gatta et al. and Madanat-Harjuoja et al.
+# and the results of the current study (Teppo et al.)
+gatta_madanat <-
+  data.frame(row = 1:23,
+             pos = c(1:5, 7:9, 11:13, 15:16, 18:20, 22:25, 27:29),
+             iccc_main = c(rep("II", 3), "II", "II",
+                           "III", "III", "III", 
+                           "IV", "IV", "IV",
+                           "V", "V",
+                           "VI", "VI", "VI",
+                           "VIII", "VIII", "VIII", "VIII",
+                           "IX", "IX", "IX"),
+             iccc_sub = c("IIa", "IIb", "IIc", "II", "II",
+                          "III", "III", "III",
+                          "IVa", "IV", "IV",
+                          "V", "V",
+                          "VIa", "VI", "VI",
+                          "VIIIa", "VIIIc", "VIII", "VIII",
+                          "IXa", "IX", "IX"),
+             dx_years=c(rep("2000-2007", 3),"2001-2010","1987-2015*",
+                        "2000-2007", "2001-2010", "1987-2015*",
+                        "2000-2007", "2001-2010", "1987-2015*",
+                        "2000-2007", "1987-2015*",
+                        "2000-2007", "2001-2010", "1987-2015*",
+                        rep("2000-2007",2),"2001-2010", "1987-2015*",
+                        "2000-2007", "2001-2010", "1987-2015*"), 
+             study = c(rep("Gatta", 3),"Madanat-Harjuoja","Teppo",
+                       "Gatta", "Madanat-Harjuoja", "Teppo",
+                       "Gatta", "Madanat-Harjuoja", "Teppo",
+                       "Gatta", "Teppo",
+                       "Gatta", "Madanat-Harjuoja", "Teppo",
+                       rep("Gatta",2), "Madanat-Harjuoja", "Teppo",
+                       "Gatta", "Madanat-Harjuoja", "Teppo"),
+             area = c(rep("Europe", 3),"Finland","Tampere Uni Hospital",
+                       "Europe", "Finland", "Tampere Uni Hospital",
+                       "Europe", "Finland", "Tampere Uni Hospital",
+                       "Europe", "Tampere Uni Hospital",
+                       "Europe", "Finland", "Tampere Uni Hospital",
+                       rep("Europe", 2),"Finland","Tampere Uni Hospital",
+                       "Europe", "Finland", "Tampere Uni Hospital"),
+             five_year_os = c(95.4, 84.0, 90.2, 91.9, 88,
+                              57.5, 79.1, 82,
+                              70.6, 68.2, 79,
+                              96.4, 92,
+                              89.4, 86.3, 85,
+                              69.3, 67.9, 71.3, 70,
+                              67.7, 73.4, 82),
+             conf.low = c(94.1, 82.0, 88.5, 80.2, 80,
+                          56.1, 70.1, 76,
+                          68.4, 50.3, 66,
+                          94.6, 77,
+                          88, 71.3, 74,
+                          66.2, 64.2, 45.0, 47,
+                          64.7, 55.8, 70),
+             conf.high = c(96.5, 85.8, 91.7, 96.8, 96,
+                           58.8, 85.7, 89,
+                           72.6, 80.8, 94,
+                           97.6, 100,
+                           90.7, 93.8, 98,
+                           72.3, 71.2, 86.6, 100,
+                           70.6, 84.9, 96))
+gatta_madanat$iccc_main <- factor(gatta_madanat$iccc_main,
+                                  levels=c("II", "III", "IV", "V", "VI", "VIII", "IX"))
+
+
+
+# Table
+grid.arrange(tableGrob(gatta_madanat))
+
+# Flipped bargraph; bar by row
+gatta_madanat_plot <- ggplot(gatta_madanat, aes(width = 0.85)) +
+  geom_bar(aes(x = pos, y = five_year_os, fill = study, width=0.8), 
+           stat = "identity") +
+  geom_errorbar(aes(x = pos, ymin = conf.low, ymax = conf.high)) +
+  coord_flip() +
+  theme_bw() +
+  scale_x_continuous(breaks = gatta_madanat$pos, 
+                     labels = gatta_madanat$iccc_sub, 
+                     trans="reverse") +
+  scale_y_continuous(breaks=seq(0, 100, by=10)) +
+  geom_text(aes(x=pos, y=25, label=paste(area, dx_years, sep=" ")), size = 4) +
+  ylab("5-year survival rate (%)") +
+  xlab("ICCC-3 class") +
+  scale_fill_grey(start=0.5, end=0.9,
+                  labels = c("Gatta G et al. (2014)",
+                                 "Madanat-Harjuoja LM et al. (2014)",
+                                 "Current")) +
+  ggtitle("Figure 3: 5-year survival rates by studies") +
+  theme(legend.position = "bottom", legend.title = element_blank())
+gatta_madanat_plot
+
+# setwd("figures&tables/protocol-output")
+# pdf("gatta-madanat-table.pdf", width=14, height=8)
+# grid.arrange(tableGrob(gatta_madanat))
+# dev.off()
+# ggsave("survival-gatta-madanat.pdf")
+# for (i in 1:2) setwd("../")
+```
+
+# 5. Batch 2: The stage distribution
+
+## 5.1. Selecting from clean data
+
+```{r stage-select, eval = TRUE}
+library(dplyr)
+stage <- pottikk %>%
+  select(iccc_main, stage)
+```
+
+## 5.2. Describing and Handling missing values
+
+Handling: Discarding incomplete observations
+
+```{r stage-complete-cases}
+stage <- stage[complete.cases(stage), ]
+```
+
+## 5.3. Analysis
+
+- Primary analytics method: Simultaneous confidence intervals for multinomial proportions
+
+```{r stage-tidy-analysis}
+# install.packages("DescTools")
+library(DescTools)
+# Empty list for results
+stage_ci <- data.frame()
+for (i in 1:length(unique(stage$iccc_main))) {
+  sb <- stage[stage$iccc_main == unique(stage$iccc_main)[i], ]
+  occur <- c(table(factor(sb$stage, levels=as.character(1:4))))
+  complete <- cbind(iccc_main = rep(unique(stage$iccc_main)[i], 4), 
+                    stage = as.character(1:4),
+                    n_per_iccc_main = rep(
+                      nrow(stage[stage$iccc_main == unique(stage$iccc_main)[i], ]),
+                      4),
+                    round(as.data.frame(MultinomCI(occur)), 2))
+  stage_ci <- rbind(stage_ci, complete)
+}
+rm(sb, occur, complete)
+```
+
+## 5.4. Tabulation
+
+```{r stage_tabulation}
+library(gridExtra)
+library(ggplot2)
+# setwd("figures&tables/protocol-output")
+# pdf("stage-table.pdf", width=4, height=15)
+# grid.arrange(tableGrob(stage_ci))
+# dev.off()
+# for (i in 1:2) setwd("../")
+grid.arrange(tableGrob(stage_ci))
+```
+
+## 5.5. Visualization
+
+```{r stage-visualization}
+## Re-arrange ICCC-levels for plot
+stage_plot <- stage_ci
+stage_plot$iccc_main <- factor(stage_plot$iccc_main,
+                             levels=c("II", "III", "IV", "V", 
+                                      "VI", "VII", "VIII", 
+                                      "IX", "X", "XI", "XII"))
+ns_stage <- data.frame(iccc_main = stage_ci$iccc_main,
+                       n = stage_ci$n_per_iccc_main)[seq(1, 44, by = 4), ]
+
+## Plot
+library(ggplot2)
+ggplot(stage_plot, aes(x=stage)) +
+  geom_bar(aes(y=est*100), stat="identity", position="stack") +
+  facet_wrap(~ iccc_main) +
+  theme_bw() +
+  geom_errorbar(aes(x=stage, ymax=upr.ci*100, ymin=lwr.ci*100), color="grey") +
+  ylab("Proportion (%)") +
+  xlab("Stage at diagnosis") +
+  ggtitle("Supplement figure 2: Stage proportions by ICCC-3 class") +
+  geom_text(data = ns_stage,
+            aes(label = paste("n =", n),
+                x = 2.5,
+                y = 80),
+            size = 4.5)
+
+## Save
+# setwd("figures&tables/protocol-output")
+# ggsave("stage-plot.pdf")
+# for (i in 1:2) setwd("../")
+```
+
+
+# 6. Batch 3. Tumor size distribution comparison inference:
+
+- Was there a difference between tumor size distributions of   
+    + a. patient populations with different stage at diagnosis?
+    + b. III and non-III groups of patients?
+- What was the difference between tumor size distributions of males and females in III and non-III patient populations?
+- What was the correlation of tumor size and age at diagnosis in III and non-III patient populations?
+- What was the correlation of tumor size and body area in non-CNS patients?
+
+## 6.1. Selecting from clean data
+
+```{r, eval = TRUE}
+library(dplyr)
+size <- pottikk %>%
+  select(sex, age_dx, iccc_cns, stage, tumorsize)
+```
+
+## 6.2. Describing and Handling missing values
+
+```{r, eval = TRUE}
+library(dplyr)
+size <- pottikk %>%
+  select(sex, age_dx, iccc_cns, stage, tumorsize) %>%
+  filter(!is.na(tumorsize)) %>%
+  arrange(tumorsize) %>%
+  mutate(sex = factor(sex), iccc_cns = as.character(iccc_cns), stage = factor(stage))
+```
+
+Handling: Complete case analysis (discard incomplete cases) in all questions.
+
+## 6.3. Analysis
+
+### 6.3.1. Description
+
+```{r tumorsize-descriptive}
+library(broom)
+library(dplyr)
+size_summary <- data.frame()
+diagnosis <- data.frame(diagnosis = c("All", rep("All", 4), "III", "Non-III", 
+                                      rep("III", 2), rep("Non-III", 2)))
+strata <-   data.frame(strata = c("None", paste("Stage", 1:4), 
+                                  rep("None", 2),  "Boy", "Girl", 
+                                  "Boy", "Girl"))
+strata_index <- list(rep(TRUE, nrow(size)),
+                     size$stage == "1",
+                     size$stage == "2",
+                     size$stage == "3",
+                     size$stage == "4",
+                     size$iccc_cns == "1",
+                     size$iccc_cns == "0",
+                     size$iccc_cns == "1" & size$sex == "Boy",
+                     size$iccc_cns == "1" & size$sex == "Girl",
+                     size$iccc_cns == "0" & size$sex == "Boy",
+                     size$iccc_cns == "0" & size$sex == "Girl")
+for (i in 1:nrow(strata)) {
+  df <- tidy(summary(size$tumorsize[strata_index[[i]]]))[1:6]
+  size_summary <- bind_rows(size_summary, df)
+}
+size_summary <- bind_cols(diagnosis, strata, size_summary)
+rm(diagnosis, strata, strata_index, df)
+```
+
+
+### 6.3.2. Inference
+
+- Checking variable and pairwise distributions
+
+```{r tumorsize-distribution-checks}
+library(ggplot2)
+library(GGally)
+ggpairs(size)
+```
+
+Six non-parametric tests in total without multiple correction:
+
+- Tumor size in stage groups = Kruskal-Wallis
+- Tumor size in cns or non-cns groups = Mann-Whitney
+- Tumor size in boys and girls (III and non-III groups) = Mann-Whitney
+- Tumor size and age (III and non-III groups) = Pearson correlation coef. test
+
+
+```{r tumorsize-analyses}
+## Empty list for test results
+size_tests <- list()
+## Tests
+size_tests[[1]] <- kruskal.test(tumorsize ~ stage, 
+                                data = filter(size, iccc_cns == "0"))
+size_tests[[2]] <- wilcox.test(tumorsize ~ iccc_cns, 
+                               data = size, 
+                               conf.int=TRUE)
+size_tests[[3]] <- wilcox.test(tumorsize ~ sex, 
+                               data = subset(size, iccc_cns == "1"),
+                               conf.int=TRUE)
+size_tests[[4]] <- wilcox.test(tumorsize ~ sex, 
+                               data = subset(size, iccc_cns == "0"), 
+                               conf.int=TRUE)
+size_tests[[5]] <- cor.test(formula = ~ tumorsize + age_dx, 
+                            data = subset(size, iccc_cns == "1"))
+size_tests[[6]] <- cor.test(formula = ~ tumorsize + age_dx, 
+                            data = subset(size, iccc_cns == "0"))
+```
+
+In addition, pair-wise comparison of tumor sizes in stage groups 1 - 4 is done with pair-wise Wilcoxon tests with Bonferroni correction.
+
+```{r tumorsize_stage_pairwise}
+library(dplyr)
+
+size_test_pairwise <- size %>%
+  filter(iccc_cns == "0") %>%
+  with(., pairwise.wilcox.test(tumorsize, stage, p.adjust.method = "bonferroni"))
+```
+
+## 6.4. Cleaning analysis outputs
+
+```{r clean-tumorsize-analysis-output}
+library(broom)
+library(dplyr)
+
+## Analyses
+size_analyses <- data.frame(
+in_group   = c("Non-III", "All", "III", "Non-III", "III", "Non-III"),
+compare_by = c("Stage", "III/Non-III", "Sex", "Sex", 
+               "Age at diagnosis", "Age at diagnosis"),
+method     = c("Kruskal-Wallis", rep("Mann-Whitney-Wilcoxon", 3),
+               rep("Pearson correlation coefficient", 2)))
+## Clean result-list
+
+
+size_test_tidy <- data.frame()
+for (i in 1:6) {
+  tidy_test <- tidy(size_tests[[i]])
+  size_test_tidy <- bind_rows(size_test_tidy, tidy_test)
+}
+size_tests <- bind_cols(size_analyses, size_test_tidy)
+rm(size_test_tidy, tidy_test, size_analyses)
+
+# Bind pair-wise results to other size-results
+size_pairwise_tests <- data.frame(in_group = rep("Non-III", 6),
+                                  compare_by = c("1 vs. 2",
+                                                 "1 vs. 3",
+                                                 "1 vs. 4",
+                                                 "2 vs. 3",
+                                                 "2 vs. 4",
+                                                 "3 vs. 4"),
+                                  method = rep("Pair-wise Wilcoxon with Bonferroni", 6),
+                                  p.value = na.omit(c(size_test_pairwise$p.value)))
+
+size_tests <- bind_rows(size_tests, size_pairwise_tests)
+```
+
+## 6.5. Tabulation
+
+```{r size_analysis_tabulation}
+library(dplyr)
+library(gridExtra)
+
+## Description
+grid.arrange(tableGrob(size_summary))
+
+## Inference
+size_tests <- size_tests %>% rename(df = parameter, test_stat = statistic)
+grid.arrange(tableGrob(size_tests))
+
+## To pdf-file also
+# setwd("figures&tables/protocol-output")
+# pdf("tumorsize-analysis-tables.pdf", width=15, height=9)
+# grid.arrange(tableGrob(size_tests), 
+#             tableGrob(size_summary), 
+#             nrow=2, ncol=1)
+# dev.off()
+# for (i in 1:2) setwd("../")
+```
+
+## 6.6. Visualization
+
+```{r tumorsize-visualization}
+library(ggplot2)
+library(gridExtra)
+
+# ICCC3 CNS level labels for facet titles
+size$iccc_cns <- factor(size$iccc_cns, labels = c("Non-CNS", "Central nervous system"))
+
+options(scipen=999)
+# setwd("figures&tables/protocol-output")
+
+## 1. Plot: Tumor size by stage
+tumorsize_stage_plot <- 
+  filter(size, !is.na(stage) & iccc_cns == "Non-CNS") %>%
+  ggplot() +
+  geom_boxplot(aes(x=stage, y=tumorsize), color = "grey50") +
+  geom_jitter(aes(x=stage, y=tumorsize), 
+              position=position_jitter(w=0.1), 
+              alpha=0.7) +
+  theme_bw() +
+  ylab("Tumor size (cm)") +
+  xlab("Stage at diagnosis") +
+  ggtitle("c) Tumor size by stage at diagnosis") +
+  annotate("segment", 
+           x = c(1, 1, 1), 
+           xend = c(2, 3, 4), 
+           y = c(18, 19, 20), 
+           yend = c(18, 19, 20), 
+           color = "black") +
+  annotate("text", 
+           x = c(1.5, 2.5, 3.5), 
+           y = c(18.3, 19.3, 20.3), 
+           label = paste("p = ", round(size_tests[["p.value"]][7:9], 4)))
+
+# ggsave("tumorsize-stage-plot.pdf", width=8, height=10)
+
+## 2. Plot: 
+# 1) Tumorsize by III/non-III, 
+# 2) sex, 
+# 3) age at diagnosis, 
+# 4) size by size
+```
+
+**Supplement figure 3 is created below:**
+
+```{r S3}
+## Subplot 1
+
+plot1 <- ggplot(subset(size, !is.na(iccc_cns))) +
+  geom_histogram(aes(x=tumorsize), binwidth=1) +
+  facet_wrap(~ iccc_cns) +
+  theme_bw() +
+  ylab("# of patients") +
+  xlab("Tumor size (cm)")
+
+## Subplot 2
+plot2_annotation <- data.frame(label = c(paste(round(size_tests[4, "conf.low"], 3),
+                                           "-",
+                                           round(size_tests[4, "conf.high"], 3),
+                                           "cm"),
+                                       paste(round(size_tests[3, "conf.low"], 3),
+                                           "-",
+                                           round(size_tests[3, "conf.high"], 3),
+                                           "cm")),
+                             x = c(1.5, 1.5),
+                             y = c(17, 17),
+                             iccc_cns = c("Non-CNS", "Central nervous system"))
+
+plot2 <- ggplot(subset(size, !is.na(sex) & !is.na(iccc_cns))) +
+  geom_boxplot(aes(x=sex, y=tumorsize)) +
+  geom_label(data = plot2_annotation, aes(label = label, x=x, y=y)) +
+  facet_wrap(~ iccc_cns) +
+  theme_bw() +
+  ylab("Tumor size (cm)") +
+  xlab("Sex")                
+
+## Subplot 3
+plot3_annotation <- data.frame(label = c(paste("(", 
+                                               round(size_tests[6, "conf.low"], 2),
+                                               ")",
+                                               " - ",
+                                               "(+", round(size_tests[6, "conf.high"], 2),
+                                               ")",
+                                               sep=""),
+                                       paste("(",
+                                             round(size_tests[5, "conf.low"], 2),
+                                             ")",
+                                             " - ",
+                                             "(",
+                                             round(size_tests[5, "conf.high"], 3),
+                                             ")",
+                                             sep="")),
+                               x=c(8, 8),
+                               y=c(17, 17),
+                               iccc_cns=c("Non-CNS", "Central nervous system"))
+
+plot3 <- ggplot(data = subset(size, !is.na(age_dx) & !is.na(iccc_cns)),
+                aes(x=age_dx, y=tumorsize)) +
+  geom_point() +
+  facet_wrap(~ iccc_cns) +
+  stat_smooth(method = "lm", formula = y ~ x, color = "grey50", size = 1) +
+  theme_bw() +
+  xlab("Age at diagnosis (years)") +
+  ylab("Tumor size (cm)") +
+  geom_label(data = plot3_annotation, 
+            aes(label = label, x=x, y=y))
+
+
+## Merge, save, and print
+grid.arrange(plot1, plot2, plot3, nrow=3, ncol=1)
+
+# pdf("tumorsize-cns-sex-age-plot.pdf", width=9, height=13)
+# grid.arrange(plot1, plot2, plot3, nrow=3, ncol=1)
+# dev.off()
+# rm(plot1, plot2, plot3, plot1_annotation, plot2_annotation, plot3_annotation)  
+
+
+# for(i in 1:2) setwd("../")
+```
+
+**Figure 2 (stage-figure) is created below**
+
+```{r figure2}
+library(gridExtra)
+library(ggplot2)
+
+grid.arrange(stagefig_surv, tumorsize_stage_plot, nrow = 1)
+```
+
+
+# 7. Batch 4: Transplantations
+
+- What proportion of patients by ICCC3 -main groups was treated with autologous stem cell transplantation?
+
+## 7.1. Selecting and filtering from clean data
+
+```{r hsct-subset, eval = TRUE}
+library(dplyr)
+hsct <- pottikk %>%
+  select(hsct, hsct_place, iccc_main) %>%
+  ## Filter transplants done in TAYS or unknown place in
+  filter(hsct_place == "TAYS" | is.na(hsct_place)) %>%
+  select(-hsct_place) %>%
+  arrange(hsct) %>%
+  mutate(iccc_main = factor(iccc_main))
+```
+
+## 7.2. Describing and Handling missing values
+
+```{r hsct-missingness, eval = TRUE}
+library(VIM)
+matrixplot(hsct)
+```
+
+Handling: complete-case analysis.
+
+```{r hsct-completecases}
+library(dplyr)
+hsct <- hsct %>% filter(!is.na(iccc_main))
+```
+
+## 7.3. Analysis
+
+Primary analytics methodology: Multiple exact binomial tests
+
+```{r hsct-inference}
+library(broom)
+library(dplyr)
+
+hsct_tests <- data.frame()
+frequencies <- tidy(table(hsct))
+for (i in unique(hsct$iccc_main)) {
+  result <- tidy(binom.test(x = rev(frequencies$Freq[frequencies$iccc_main == i])))
+  hsct_tests <- bind_rows(hsct_tests, bind_cols(data.frame(diagnosis = i), result))
+}
+
+rm(frequencies, result)
+```
+
+## 7.4. Tabulation
+
+```{r hsct-tabulation}
+library(gridExtra)
+
+hsct_tests <- hsct_tests %>%
+  rename(n_treated = statistic, n_all = parameter) %>%
+  select(-p.value)
+
+grid.arrange(tableGrob(hsct_tests))
+
+# setwd("figures&tables/protocol-output")
+# pdf("hsct-table.pdf")
+# grid.arrange(tableGrob(hsct_tests))
+# dev.off()
+# for (i in 1:2) setwd("../")
+```
+
+
+## 7.5. Visualization
+
+```{r hsct-visualization}
+library(ggplot2)
+
+## Names and ordering for the plot
+if (is.numeric(hsct$hsct)) hsct$hsct <- factor(hsct$hsct)
+hsct$iccc_main <- factor(hsct$iccc_main,
+                         levels=c("II", "III", "IV", "V",
+                                  "VI", "VII", "VIII",
+                                  "IX", "X", "XI", "XII"))
+names(hsct_tests) <- c("iccc_main", "estimate",
+                       "n_treated", "n_all",
+                       "conf.low", "conf.high")
+hsct_tests$iccc_main <- factor(hsct_tests$iccc_main,
+                         levels=c("II", "III", "IV", "V",
+                                  "VI", "VII", "VIII",
+                                  "IX", "X", "XI", "XII"))
+
+## Bar graph with errorbars and  relative frequencies
+hsct_plot <- ggplot(hsct_tests) +
+  geom_bar(aes(x=iccc_main, y=estimate*100), stat="identity") +
+  geom_errorbar(aes(x=iccc_main, ymin=conf.low*100, ymax=conf.high*100),
+                color="grey") +
+  geom_text(aes(label=paste(n_treated, "/", n_all),
+                x=iccc_main,
+                y=conf.high*100 + 4)) +
+  xlab("ICCC-3 class") +
+  ylab("Proportion with auto-HSCT (%)") +
+  scale_y_continuous(breaks=seq(0, 100, by=20), limits=c(0, 100)) +
+  theme_bw() +
+  ggtitle("a)")
+hsct_plot
+
+# setwd("figures&tables/protocol-output")
+# ggsave("transplantations-plot.pdf", width=8, height=10)
+# for (i in 1:2) setwd("../")
+```
+
+# 8. Batch 5: Diagnostic imaging trends
+
+- What were the trends of diagnostic imaging modalities like?
+- How likely was there a change in the populations of trends of diagnostic imaging modalities?
+
+## 8.1. Selecting and filtering from clean data
+```{r subset-imaging, eval = TRUE}
+library(dplyr)
+imaging <- pottikk %>%
+  select(dx_year, bonemap:mri) %>%
+  ## Delete 2015 (not full year of data)
+  filter(dx_year < 2015) %>%
+  arrange(dx_year, mri)
+```
+
+## 8.2. Describing and Handling missing values
+
+Missingness structure:
+
+```{r imaging-missingness, eval = TRUE}
+library(VIM)
+matrixplot(imaging)
+## Delete cases with all imaging data missing
+imaging <- imaging %>%
+  filter(any(!is.na(bonemap),
+             !is.na(mibg),
+             !is.na(pet),
+             !is.na(ct),
+             !is.na(mri)))
+## Calculate missing values in variables
+imaging_missing <- apply(imaging, 2, function(x) sum(is.na(x)))
+imaging_missing
+``` 
+
+Handling: Complete case analyses by imaging variable.
+
+## 8.3. Analysis
+
+### 8.3.1. Description/Summarization
+
+```{r imaging-summary}
+imaging_summary <- imaging %>%
+  group_by(dx_year) %>%
+  summarise_each(funs(mean(., na.rm=TRUE), sum(., na.rm=TRUE)))
+```
+
+- Tabulation: 
+
+```{r imaging-tabulation}
+library(gridExtra)
+grid.arrange(tableGrob(round(imaging_summary, 4)))
+# setwd("figures&tables/protocol-output")
+pdf("imaging-summary-table.pdf", width=14, height=12)
+grid.arrange(tableGrob(round(imaging_summary, 4)))
+dev.off()
+# for (i in 1:2) setwd("../")
+```
+
+### 8.3.2. Analysis
+
+Primary time-series analytics method: 
+
+- Visualization and loess-smoother
+
+**Visualization:**
+
+```{r imaging-visualization}
+library(ggplot2)
+## Goal: Modality-faceted time-series scatter with smoothers
+## 1. Wrangle data for handier plotting
+library(tidyr)
+library(dplyr)
+imaging_prop <- imaging_summary %>%
+  select(dx_year, contains("mean")) %>%
+  gather(modality, prop, contains("mean"))
+imaging_count <- imaging_summary %>%
+  select(dx_year, contains("sum")) %>%
+  gather(modality, count, contains("sum"))
+## Proportion time-series plot
+imaging_prop_plot <- ggplot(imaging_prop) +
+  geom_point(aes(x=dx_year, y=prop)) +
+  geom_smooth(aes(x=dx_year, y=prop), method="loess") +
+  facet_wrap(~ modality) +
+  scale_y_continuous(breaks=seq(0, 1, by=0.2), limits=c(0, 1.1)) +
+  scale_x_continuous(breaks=seq(1987, 2014, by=3), limits=c(1986, 2015)) +
+  theme_bw() +
+  ylab("Proportion imaged") +
+  xlab("Year of diagnosis") +
+  theme(axis.text.x = element_text(size=8))
+## Count time-series plot
+imaging_count_plot <- ggplot(imaging_count) +
+  geom_point(aes(x=dx_year, y=count)) +
+  geom_smooth(aes(x=dx_year, y=count), method="loess") +
+  facet_wrap(~ modality) +
+  scale_y_continuous(breaks=seq(0,30, by=10), limits=c(-2, 31)) +
+  scale_x_continuous(breaks=seq(1987, 2014, by=3), limits=c(1986, 2015)) +
+  theme_bw() +
+  xlab("Year of diagnosis") +
+  ylab("Count imaged") +
+  theme(axis.text.x = element_text(size=8))
+## Print and save
+# setwd("figures&tables/protocol-output")
+imaging_prop_plot
+ggsave("imaging-trend-prop.pdf", width=9, height=8)
+imaging_count_plot
+ggsave("imaging-trend-count.pdf", width=9, height=8)
+# for (i in 1:2) setwd("../")
+rm(imaging_prop, imaging_count)
+```
+
+# 9. Batch 6: Metastasis proportions
+
+- What was the proportion of metastasised cancers (at diagnosis) in...
+  a. III group?
+  b. non-III group?
+
+## 9.1. Calculating and merging metastasis-variable from raw data
+```{r metastasis-subset, eval = TRUE}
+library(dplyr)
+library(readxl)
+raw <- read_excel(path = path_raw)
+metastasis <- raw %>%
+  select(id = Id, ds = Ds,
+         brain = MetastaasiAivot_KKdiagnoosivaihe,
+         lung = MetastaasiKeuhkot_KKdiagnoosivaihe,
+         bone = MetastaasiLuusto_KKdiagnoosivaihe,
+         marrow = MetastaasiLuuydin_KKdiagnoosivaihe,
+         liver = MetastaasiMaksa_KKdiagnoosivaihe,
+         other = MetastaasiMuu_KKdiagnoosivaihe) %>%
+  filter(ds == 1) %>%
+  mutate(id = as.character(id))
+## Metastasis variable:
+## if any location-specific variable "Yes" (Kyllä) or 
+## locations are given in free text variable; gets value 1,
+## otherwise no metastasis and gets 0.
+metastasis$metastasis <- c()
+for (i in 1:nrow(metastasis)) {
+  metastasis_test <- with(metastasis[i, ],
+                          brain == "Kyllä" & !is.na(brain) |
+                            lung == "Kyllä" & !is.na(lung) |
+                            bone == "Kyllä" & !is.na(bone) |
+                            marrow == "Kyllä" & !is.na(marrow) |
+                            liver == "Kyllä" & !is.na(liver) |
+                            !is.na(other))
+  if (metastasis_test) {
+    metastasis$metastasis[i] <- 1
+  } else {
+    metastasis$metastasis[i] <- 0
+  }
+}
+metastasis_i <- metastasis %>% select(id, metastasis)
+## Merge metastasis data with ICCC-diagnosis class data
+metastasis <- left_join(pottikk[ ,c("id", "iccc_cns")],
+                        metastasis_i,
+                        by="id")
+metastasis <- metastasis %>% 
+  select(-id) %>%
+  arrange(iccc_cns)
+```
+
+## 9.2. Describing and Handling missing values
+**Missingness** structure:
+```{r metastasis-missingness, eval = TRUE}
+library(VIM)
+matrixplot(metastasis)
+```
+
+- Missing values in CNS-tumors: 3
+- Missing values in non-CNS-tumors: 27
+
+**Handling**: Complete observations only.
+
+```{r metastasis-complete-obs}
+metastasis <- metastasis[complete.cases(metastasis), ]
+```
+
+## 9.3. Analysis
+
+### 9.3.1. Description/Summarising
+
+```{r metastasis-summary}
+metastasis_summary <- metastasis %>%
+  group_by(iccc_cns) %>%
+  summarise(all = n(), count = sum(metastasis), 
+            proportion = round(mean(metastasis), 6))
+```
+
+### 9.3.2. Inference
+
+Primary analytics methodology: Two-sample test for equality of proportions with continuity correction.
+
+```{r metastasis-inference}
+library(broom)
+metastasis_inference <- tidy(prop.test(x = metastasis_summary$count,
+                                       n = metastasis_summary$all))
+metastasis_inference <- cbind(
+  data.frame(method = "2-sample approx. test\nof proportions\nwith continuity correction"),
+  round(metastasis_inference, 6))
+```
+
+## 9.4. Tabulation
+
+```{r metastasis-tabulation}
+library(gridExtra)
+# setwd("figures&tables/protocol-output")
+grid.arrange(tableGrob(metastasis_summary),
+             tableGrob(metastasis_inference))
+pdf("metastasis-table.pdf", width=10, height=8)
+grid.arrange(tableGrob(metastasis_summary),
+             tableGrob(metastasis_inference))
+dev.off()
+# for (i in 1:2) setwd("../")
+```
+
+
+## 9.5. Visualization
+```{r metastasis-visualization}
+library(ggplot2)
+metastasis_plot <- ggplot(metastasis_summary) +
+  geom_bar(aes(x=as.character(iccc_cns), y=proportion), stat="identity") +
+  scale_y_continuous(limits=c(0, 1), breaks=seq(0, 1, by=0.2)) +
+  theme_bw() +
+  annotate("text", 
+           label=paste("Difference is ",
+                       metastasis_inference[1, "conf.low"]*100,
+                       "%",
+                       " - ",
+                       metastasis_inference[1, "conf.high"]*100,
+                       "%",
+                       "\nwith 95% confidence"),
+           x=1.5,
+           y=0.7) +
+  ylab("Proportion having\nmetastasis at diagnosis") +
+  xlab("Diagnostic class") +
+  scale_x_discrete(labels=c("Non-CNS solid tumors",
+                              "CNS tumors"))
+# setwd("figures&tables/protocol-output")
+metastasis_plot
+ggsave("metastasis-plot.pdf")
+# for (i in 1:2) setwd("../")
+```
+
+# 10. Batch 7: Exploratory Cox regression modeling of survival time
+
+## 10.1. Additional variables from the raw data
+
+- Height, weight, and metastasis variables are added to the dataset
+
+```{r cox-dataset-preparation}
+library(dplyr)
+library(readxl)
+
+cox_dataset <- pottikk
+
+path_raw <- 'G:/Projects/potti/data/raw/potti-kk-20150529.xlsx'
+raw <- read_excel(path = path_raw)
+weightheight <- raw %>%
+  select(id = Id, ds = Ds,
+         weight = Paino_KKyleinen,
+         height = Pituus_KKyleinen) %>%
+  mutate(id = as.character(id)) %>%
+  filter(ds == 1) %>%
+  select(-ds)
+
+# Join datasets and select potentially useful explanatory variables
+# Filter to non-CNS tumours
+# Categorise 4-class stage to 2-class: stage 4 vs. other classes
+
+cox_dataset <- cox_dataset %>%
+  left_join(weightheight, by="id") %>%
+  left_join(metastasis_i, by="id") %>%
+  filter(iccc_cns == 0) %>%
+  select(c(-(1:3), -5, -7, -9, -(16:21), -24)) %>%
+  mutate(stage = ifelse(stage == "4", 1, 0),
+         sex = ifelse(sex == "Girl", 1, 0))
+
+# Fix entry errors in weight and height variables
+cox_dataset$weight[which(cox_dataset$weight == 2780)] <- 2.780
+cox_dataset$height[which(cox_dataset$height == 17.3)] <- 173
+
+# Body area as a composite measure of body size by
+# Du Bois -formula: = 0.007184 x height(m)^0.725 x weight(kg)^0.425, and
+# Delete height and weight from the dataset
+cox_dataset <- cox_dataset %>%
+  mutate(area = 0.007184 * height^0.725 * weight^0.425) %>%
+  select(-weight, -height)
+```
+
+## 10.2. Cox proportional hazards regression with all predictor combinations
+
+## 10.2.1. Modeling
+
+- Severe data dregding if not interpreted and reported appropriately
+
+```{r cox-regressions, eval = FALSE}
+# Generate all possible formulas (= response-predictors -variations)
+all_predictors <- colnames(cox_dataset)[-(2:3)]
+
+library(gtools)
+formulas <- c()
+for (r in 1:length(all_predictors)) {
+combs <- combinations(n = length(all_predictors), r = r, v = all_predictors)
+forms <- apply(combs, 1, function(x) {
+  preds <- paste(x, collapse = " + ")
+  paste("Surv(followup, death)" , preds, sep = " ~ ")})
+formulas <- c(formulas, forms)
+}
+
+# Run Cox regression with each formula,
+# Do diagnostics for the model, and
+# Collect the relevant statistics to results data.frame
+library(survival)
+library(broom)
+
+# 2 formula-columns, 21 coefficients, and 8 model statistics
+cox_res <- matrix(nrow=length(formulas), ncol=27)
+
+for (i in 1:length(formulas)) {
+  
+  # Model fit
+  fit <- coxph(as.formula(formulas[i]), data = cox_dataset)
+  
+  # Set column names in the first run
+  if (i == 1) {
+    ests <- tidy(fit)
+    mod_stats <- glance(fit)
+    colnames(cox_res) <- c("model",
+                           "n_predictors",
+                           paste("iccc_main", unique(cox_dataset$iccc_main), sep=""),
+                           all_predictors[-1], 
+                           colnames(mod_stats)[c(4, 6, 8, 9, 10, 14, 15)],
+                           "ph_assum_pvalue")
+  }
+  
+  # Add formula
+  cox_res[i, 1] <- formulas[i]
+  # How many predictors
+  library(stringr)
+  cox_res[i, 2] <- str_count(formulas[i], "\\+") + 1
+
+  # Add predictor statistics
+  ests <- tidy(fit)
+  for (b in 1:nrow(ests)) {
+    cox_res[i, which(colnames(cox_res) == ests$term[b])] <- as.character(round(ests$estimate[b], 5))
+  }
+  
+  # Model statistics 
+  mod_stats <- glance(fit)[c(4, 6, 8, 9, 10, 14, 15)]
+  mod_stats <- apply(mod_stats, 2, function(x) {as.character(x)})
+  cox_res[i, 20:26] <- mod_stats
+  
+  # Test for proportional hazards (model-level)
+  zph_test <- cox.zph(fit)$table
+  zph_test_pvalue <-  zph_test[nrow(zph_test), ncol(zph_test)]
+  cox_res[i, 27] <- as.character(zph_test_pvalue)
+}
+# iccc_mainII is the reference class for other classes
+cox_res[ , 3] <- rep("ref", 255)
+
+cox_res <- data.frame(cox_res)
+cox_res[ , c(-1, -3)] <- apply(cox_res[ , c(-1, -3)], 2, as.numeric)
+cox_res$model <- as.character(cox_res$model)
+
+# Coefficient transformation: log(HR) -> HR
+cox_res[ , 4:19] <- apply(cox_res[ , 4:19], 2, exp)
+
+```
+
+### 10.2.2. Visualization of the results
+
+Coefficients:
+
+```{r, eval = FALSE}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+cox_res_vis_coef <- cox_res %>%
+  gather("predictor", "coef", 4:19)
+
+ggplot(cox_res_vis_coef) +
+  geom_histogram(aes(x = coef)) +
+  facet_wrap(~ predictor, scales="free") +
+  geom_vline(xintercept = 1, color="red")
+```
+
+Goodness-of-fit -statistics:
+
+```{r, eval = FALSE}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+cox_res_vis_stats <- cox_res %>%
+  select(20:27) %>%
+  gather("stat", "value")
+
+ggplot(cox_res_vis_stats) +
+  geom_histogram(aes(x=value)) +
+  facet_wrap(~ stat, scales="free")
+```
+
+"The best fit" models (20):
+
+```{r, fig.height=15, fig.width=15, eval = FALSE}
+library(gridExtra)
+library(dplyr)
+
+cox_res %>%
+  filter(ph_assum_pvalue > 0.05 & 
+           p.value.log < 0.05 & 
+           p.value.sc < 0.05 & 
+           p.value.wald < 0.05) %>%
+  arrange(desc(r.squared), desc(AIC), desc(BIC)) %>%
+  slice(1:20) %>%
+  select(model)
+```
+
+## 10.3. Exploring individual models and associations
+
+### 10.3.1. Full model
+
+The full model (all initially selected predictors):
+
+```{r, eval = FALSE}
+library(broom)
+library(survival)
+library(dplyr)
+library(ggplot2)
+
+cox_dataset %>%
+  coxph(formula = Surv(followup, death) ~ age_dx + area + dx_year + 
+                  hsct + iccc_main + sex + stage + tumorsize,
+        data = .) %>%
+  tidy() %>%
+  ggplot() +
+    geom_pointrange(aes(x = term,
+                        y = exp(estimate),
+                        ymin = exp(conf.low),
+                        ymax = exp(conf.high))) +
+    scale_y_log10() +
+    geom_hline(yintercept=1) +
+    labs(y = "hazard ratio (note log-scale)")
+```
+
+- ICCC-variable gives extremely imprecise estimates due to low sample size
+- Given other variables, age, diagnosis year, and tumor size seem to be quite precisely close to no association (HR = 1)
+
+### 10.3.2. Adjusted association between diagnosis year and survival?
+
+When we model only diagnosis year:
+
+```{r, eval = FALSE}
+library(broom)
+library(survival)
+library(dplyr)
+
+coxph_dxyear <- pottikk %>%
+  coxph(formula = Surv(followup, death) ~ dx_year,
+        data = .) %>%
+  tidy(exp = TRUE)
+
+# Model statistics
+coxph_dxyear
+
+```
+
+Let's adjust with age_dx, sex, stage, and hsct (which is confounded with factors associated with the treatment selection):
+
+```{r, eval = FALSE}
+library(dplyr)
+library(broom)
+library(survival)
+library(ggplot2)
+
+coxph_dxyear_adj <- pottikk %>%
+  coxph(formula = Surv(followup, death) ~ 
+          age_dx + dx_year + sex + stage + hsct, 
+        data = .) %>%
+  tidy(exp = TRUE)
+
+coxph_dxyear_adj
+
+coxph_dxyear_adj %>%
+  ggplot() +
+    geom_pointrange(aes(x = term,
+                        y = exp(estimate),
+                        ymin = exp(conf.low),
+                        ymax = exp(conf.high))) +
+    geom_hline(yintercept=1) +
+    labs(y = "hazard ratio")
+```
+
+- There's basically no change: no association between diagnosis year and survival, given these variables.
+
+### 10.3.3. Exploring the adjusted associations of stage and survival
+
+The visualization of all of the models above show that point estimates of stage's hazard ratios vary between 3 and 15.5. 
+
+Let's see the unadjusted model:
+
+```{r, eval = FALSE}
+library(dplyr)
+library(broom)
+library(survival)
+
+pottikk %>%
+  filter(iccc_main != "III" & !is.na(iccc_main)) %>%
+  mutate(stage = ifelse(stage == "4", "meta", "local")) %>%
+  coxph(formula = Surv(followup, death) ~ stage, data = .) %>%
+  tidy(exp = TRUE)
+```
+
+Getting stem cell transplantation treatment should be related to stage and other disease severity variables:
+
+```{r, eval = FALSE}
+library(dplyr)
+library(broom)
+library(survival)
+
+cox_dataset %>%
+  coxph(formula = Surv(followup, death) ~ stage + hsct,
+        data = .)
+```
+
+- Full model gave a point-estimate around HR = 6
+- Unadjusted model gives a point-estimate around HR = 11
+    + This is quite reasonable analysis, given the other variables, to get a measure of the predictive importance (at least) of stage.
+- Adjusting with HSCT drops the point estimate to around HR = 7
+    + The most likely explanation is that getting auto-HSCT -treatment reflects both stage and additional different disease severity factors far beyond the treatment effects (which are hard if not impossible to measure from this data).
+
+### 10.3.3. Exploring the adjusted associations of auto-HSCT and survival
+
+```{r hsct-survival-adj}
+library(gridExtra)
+library(broom)
+library(survival)
+library(dplyr)
+library(ggplot2)
+
+hsct_surv_model <- pottikk %>%
+  filter(iccc_main != "III") %>%
+  mutate(stage = ifelse(stage != "4", "non-meta", "meta"),
+         relapse_status = factor(relapse_status)) %>%
+  mutate(stage = factor(stage, levels = c("non-meta", "meta"))) %>%
+  coxph(formula = Surv(followup, death) ~ age_dx + hsct + stage + relapse_status,
+        data = .)
+
+hsct_surv_model
+# Diagnose model assumptions
+hsct_surv_model_ph <- cox.zph(hsct_surv_model)
+plot(hsct_surv_model_ph)
+
+# Predicted survival curves
+hsct_surv_fitted <- survfit(hsct_surv_model,
+                            newdata = data.frame(hsct = c(0,1), 
+                                                 age_dx = c(6.4, 6.4), 
+                                                 stage = c("meta", "meta"), 
+                                                 relapse_status = c("1", "1")))
+
+# Visualize adjusted survival curves
+hsct_surv_plot <-  hsct_surv_fitted %>%
+      tidy() %>%
+      bind_rows(data.frame(time = 0, 
+                           estimate.1 = 1,
+                           estimate.2 = 1,
+                           conf.high.1 = 1,
+                           conf.high.2 = 1,
+                           conf.low.1 = 1,
+                           conf.low.2 = 1)) %>%
+      ggplot(aes(x = time)) +
+        geom_step(aes(y = estimate.1*100), color = "black", size = 1.2) +
+        geom_step(aes(y = estimate.2*100), color = "grey50", size = 1.2) +
+        geom_ribbon(aes(ymin = conf.low.1*100, ymax = conf.high.1*100), 
+                    alpha = 0.05, 
+                    color = "black",
+                    fill = "black",
+                    linetype = "dashed") +
+        geom_ribbon(aes(ymin = conf.low.2*100, ymax = conf.high.2*100), 
+                    alpha = 0.05,
+                    color = "grey50",
+                    fill = "grey50",
+                    linetype = "dotted") +
+        scale_x_continuous(breaks = c(0,10, 20, 30),
+                           limits = c(0, 30)) +
+        theme_bw() +
+        ylab("Survival rate (%)") +
+        xlab("Follow up (years)") +
+        ggtitle("b)")
+    
+
+# Visualize coefficients
+hsct_coef_plot <- hsct_surv_model %>%
+  tidy() %>%
+  ggplot() +
+    geom_pointrange(aes(x = term,
+                        y = exp(estimate),
+                        ymin = exp(conf.low),
+                        ymax = exp(conf.high)),
+                    size = 0.6) +
+    scale_y_log10(breaks = c(0, 0.5, 1, 2, 5, 10, 50, 100)) +
+    geom_hline(yintercept=1) +
+    labs(y = "hazard ratio (note log-scale)") +
+    theme_bw() +
+    ylab("Hazard ratio (log-scale)") +
+    xlab("Covariate") +
+    scale_x_discrete(labels = c("Age", "auto-HSCT", "Relapsed", "Stage 4")) +
+  ggtitle("c)")
+```
+
+**Supplement figure 4 is created below:**
+
+```{r suppl-fig4}
+library(gridExtra)
+library(ggplot2)
+
+hsct_fig <- arrangeGrob(hsct_surv_plot, hsct_coef_plot, nrow = 1) %>%
+    arrangeGrob(hsct_plot, ., nrow = 2)
+grid.arrange(hsct_fig)
+```
+
+
+# 11. Batch 8: Correlation between body area and tumor size
+
+```{r, eval = FALSE}
+# Software
+library(ggplot2)
+library(Cairo)
+
+# Dataset prepared in the Cox analysis -batch will be used
+areasize_data1 <- cox_dataset %>%
+  select(tumorsize, area) %>%
+  # Complete observations only
+  na.omit()
+
+# Correlation test
+cor_area_size1 <- areasize_data %>%
+  cor.test(~ area + tumorsize, data = .)
+
+# Plot
+areasize_data1 %>%
+  ggplot() +
+    geom_point(aes(x = area, y = tumorsize)) +
+    geom_smooth(aes(x = area, y = tumorsize), method = "lm", color = "black") +
+    geom_label(label = paste("Pearson correlation: ",
+                             round(cor_area_size1$estimate, 2),
+                             " (95% CI: ",
+                             round(cor_area_size1$conf.int[1], 2),
+                             " - ",
+                             round(cor_area_size1$conf.int[2], 2),
+                             ")",
+                             sep = ""),
+               x = 1.1,
+               y = 19,
+               size = 5) +
+    labs(y = "Tumor size (cm)", 
+         x = expression("Body area (" * m^2 * "; Du Bois -formula)", sep = "")) +
+    theme(axis.title = element_text(size = 14))
+
+ggsave("G:/Projects/potti/figures&tables/protocol-output/size-area-scatter.pdf")
+```
+
+```{r, eval = FALSE}
+# Tumor size vs. body surface area -plot for supplement-figure3
+# -------------------------------------------------------------
+# Software
+library(dplyr)
+library(ggplot2)
+
+# ----- Pipeline -----
+areasize_data2 <- raw %>%
+  select(ds = Ds,
+         weight = Paino_KKyleinen,
+         height = Pituus_KKyleinen,
+         tumorsize = Primaarikasvaimenkok_KKdiagnoosivaihe,
+         iccc_main = starts_with("ICCC3")) %>%
+  filter(ds == 1, !is.na(iccc_main1)) %>% # Primary cases with ICCC3
+  select(weight, height, iccc_main = iccc_main1, tumorsize) %>%
+  mutate(weight = ifelse(weight == 2780, 2.780, weight),
+         height = ifelse(height == 17.3, 173, height),
+         area = 0.007184 * height^0.725 * weight^0.425,
+         iccc_main = ifelse(iccc_main == "III", "CNS", "Non-CNS")) %>% # DuBois-formula
+  select(-weight, -height) %>% # Don't need anymore
+  na.omit() # Complete observations
+
+# Correlation tests by ICCC3
+cor_area_size2 <- list()
+cor_area_size2[[1]] <- areasize_data2 %>%
+  filter(iccc_main == "CNS") %>%
+  cor.test(~ area + tumorsize, data = .)
+cor_area_size2[[2]] <- areasize_data2 %>%
+  filter(iccc_main != "CNS") %>%
+  cor.test(~ area + tumorsize, data = .)
+
+cor_area_size2
+
+# Number of observations
+areasize_data2 %>%
+  group_by(iccc_main) %>%
+  summarise(n())
+
+# Plotting
+plot_areasize <- areasize_data2 %>%
+  ggplot(aes(x = area, y = tumorsize)) +
+    geom_point() +
+    geom_smooth(method = "lm", color = "black") +
+    facet_wrap(~ iccc_main) +
+    theme_bw()
+
+plot_areasize
+ggsave("figures&tables/protocol-output/area-size-by-icccmain.pdf",
+       width = 7,
+       height = 3.5)
+
+```
+
